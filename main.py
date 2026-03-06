@@ -1,69 +1,69 @@
-"""
-ChatGPT Clone - Streamlit 기반 AI 채팅 앱
-OpenAI Agents SDK와 SQLite 세션을 사용해 대화 기록을 유지합니다.
-"""
-
-# 환경 변수 로드 (.env 파일의 OPENAI_API_KEY 등)
 import dotenv
-import asyncio
-import streamlit as st
+
 dotenv.load_dotenv()
-from agents import Agent, Runner, SQLiteSession, WebSearchTool,FileSearchTool
 from openai import OpenAI
+import asyncio
+import base64
+import streamlit as st
+from agents import Agent, Runner, SQLiteSession, WebSearchTool, FileSearchTool
 
-client=OpenAI()
+client = OpenAI()
 
-VECTOR_STORE_ID="vs_69aa7adec680819198b7eeba48811a80"
 
-# 세션에 에이전트가 없으면 새로 생성 (페이지 새로고침 시 유지)
+def get_or_create_vector_store():
+    """세션에 vector store가 없으면 새로 생성합니다."""
+    if "vector_store_id" not in st.session_state:
+        vs = client.vector_stores.create(name="chatgpt-clone-files")
+        st.session_state["vector_store_id"] = vs.id
+    return st.session_state["vector_store_id"]
+
+
 if "agent" not in st.session_state:
     st.session_state["agent"] = Agent(
         name="ChatGPT Clone",
         instructions="""
         You are a helpful assistant.
-        
-        You have access to the followingn tools:
-         - Web Search Tool: Use this when the user asks a questions that isn't in your training data.
-           Use this tool when the users asks about current or future events.
-           whe you think you don't know the answer. try searching for it in the wer fist.
-        - File Search Tool: Use this tool when the user asks a question about facts related to themselves,
-           Or when they ask questions about specific files.
+
+        You have access to the followign tools:
+            - Web Search Tool: Use this when the user asks a questions that isn't in your training data. Use this tool when the users asks about current or future events, when you think you don't know the answer, try searching for it in the web first.
+            - File Search Tool: Use this tool when the user asks a question about facts related to themselves. Or when they ask questions about specific files.
         """,
         tools=[
             WebSearchTool(),
             FileSearchTool(
-                vector_store_ids=[VECTOR_STORE_ID],
+                vector_store_ids=[get_or_create_vector_store()],
                 max_num_results=3,
             ),
         ],
     )
-
 agent = st.session_state["agent"]
 
-
-# 대화 기록을 SQLite DB에 저장하는 세션 (페이지 새로고침 후에도 이력 유지)
 if "session" not in st.session_state:
     st.session_state["session"] = SQLiteSession(
         "chat-history",
-        "chat-gpt-clone-memory.db"
+        "chat-gpt-clone-memory.db",
     )
 session = st.session_state["session"]
 
 
 async def paint_history():
-    """세션에 저장된 대화 이력을 화면에 그립니다."""
     messages = await session.get_items()
 
     for message in messages:
-        # 사용자/어시스턴트 메시지 렌더링
         if "role" in message:
             with st.chat_message(message["role"]):
                 if message["role"] == "user":
-                    st.write(message["content"])
-                elif message["type"] == "message":
-                    st.write(message["content"][0]["text"].replace("$", "\$"))
+                    content = message["content"]
+                    if isinstance(content, str):
+                        st.write(content)
+                    elif isinstance(content, list):
+                        for part in content:
+                            if "image_url" in part:
+                                st.image(part["image_url"])
 
-        # 웹 검색 도구 호출 시 표시
+                else:
+                    if message["type"] == "message":
+                        st.write(message["content"][0]["text"].replace("$", "\\$"))
         if "type" in message:
             if message["type"] == "web_search_call":
                 with st.chat_message("ai"):
@@ -73,6 +73,9 @@ async def paint_history():
                     st.write("🗂️ Searched your files...")
 
 
+asyncio.run(paint_history())
+
+
 def update_status(status_container, event):
 
     status_messages = {
@@ -103,47 +106,12 @@ def update_status(status_container, event):
     if event in status_messages:
         label, state = status_messages[event]
         status_container.update(label=label, state=state)
-def update_status(status_container, event):
-
-    status_messages = {
-        "response.web_search_call.completed": ("✅ Web search completed.", "complete"),
-        "response.web_search_call.in_progress": (
-            "🔍 Starting web search...",
-            "running",
-        ),
-        "response.web_search_call.searching": (
-            "🔍 Web search in progress...",
-            "running",
-        ),
-        "response.file_search_call.completed": (
-            "✅ File search completed.",
-            "complete",
-        ),
-        "response.file_search_call.in_progress": (
-            "🗂️ Starting file search...",
-            "running",
-        ),
-        "response.file_search_call.searching": (
-            "🗂️ File search in progress...",
-            "running",
-        ),
-        "response.completed": (" ", "complete"),
-    }
-
-    if event in status_messages:
-        label, state = status_messages[event]
-        status_container.update(label=label, state=state)
 
 
-
-
-
-# 채팅 입력창
 async def run_agent(message):
-    """에이전트에게 메시지를 보내고 스트리밍 응답을 받습니다."""
     with st.chat_message("ai"):
-        status_container = st.status("⏳", expanded=False)  # 웹 검색 등 진행 상태 표시
-        text_placeholder = st.empty()  # 스트리밍 텍스트 출력용
+        status_container = st.status("⏳", expanded=False)
+        text_placeholder = st.empty()
         response = ""
 
         stream = Runner.run_streamed(
@@ -154,17 +122,23 @@ async def run_agent(message):
 
         async for event in stream.stream_events():
             if event.type == "raw_response_event":
+
                 update_status(status_container, event.data.type)
+
                 if event.data.type == "response.output_text.delta":
                     response += event.data.delta
-                    text_placeholder.write(response)
+                    text_placeholder.write(response.replace("$", "\\$"))
 
-# 앱 로드 시 저장된 대화 이력 표시
-asyncio.run(paint_history())
+
 prompt = st.chat_input(
     "Write a message for your assistant",
     accept_file=True,
-    file_type=["txt"],
+    file_type=[
+        "txt",
+        "jpg",
+        "jpeg",
+        "png",
+    ],
 )
 
 if prompt:
@@ -179,10 +153,34 @@ if prompt:
                     )
                     status.update(label="⏳ Attaching file...")
                     client.vector_stores.files.create(
-                        vector_store_id=VECTOR_STORE_ID,
+                        vector_store_id=get_or_create_vector_store(),
                         file_id=uploaded_file.id,
                     )
                     status.update(label="✅ File uploaded", state="complete")
+        elif file.type.startswith("image/"):
+            with st.status("⏳ Uploading image...") as status:
+                file_bytes = file.getvalue()
+                base64_data = base64.b64encode(file_bytes).decode("utf-8")
+                data_uri = f"data:{file.type};base64,{base64_data}"
+                asyncio.run(
+                    session.add_items(
+                        [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "input_image",
+                                        "detail": "auto",
+                                        "image_url": data_uri,
+                                    }
+                                ],
+                            }
+                        ]
+                    )
+                )
+                status.update(label="✅ Image uploaded", state="complete")
+            with st.chat_message("human"):
+                st.image(data_uri)
 
     if prompt.text:
         with st.chat_message("human"):

@@ -4,3 +4,4 @@
 ## "Open AI Aagent 에서 제공해주는 Hosted Tools" 사용하기
 ### 8.2 Web Search Tool 
 ### 8.3 File Search Tool
+### 8.4 Multi Modal Agent
