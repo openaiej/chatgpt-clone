@@ -3,3 +3,4 @@
 # 2026-03-06(금)
 ## "Open AI Aagent 에서 제공해주는 Hosted Tools" 사용하기
 ### 8.2 Web Search Tool 
+### 8.3 File Search Tool
