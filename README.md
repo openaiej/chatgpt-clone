@@ -5,3 +5,4 @@
 ### 8.2 Web Search Tool 
 ### 8.3 File Search Tool
 ### 8.4 Multi Modal Agent
+### 8.5 Image Generation Tool
