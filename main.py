@@ -1,6 +1,10 @@
+"""
+ChatGPT 클론 - OpenAI Agents SDK 기반 스트리밍 채팅 앱
+- 웹 검색, 파일 검색, 이미지 생성, 코드 실행, MCP(Context7) 도구 지원
+"""
 import dotenv
 
-dotenv.load_dotenv()
+dotenv.load_dotenv()  # .env에서 OPENAI_API_KEY 로드
 from openai import OpenAI
 import asyncio
 import base64
@@ -12,17 +16,21 @@ from agents import (
     WebSearchTool,
     FileSearchTool,
     ImageGenerationTool,
+    CodeInterpreterTool,
+    HostedMCPTool
 )
 
 client = OpenAI()
 
 def get_or_create_vector_store():
-    """세션에 vector store가 없으면 새로 생성합니다."""
+    """파일 검색용 Vector Store 생성 또는 반환 (업로드된 파일 임베딩 저장)"""
     if "vector_store_id" not in st.session_state:
         vs = client.vector_stores.create(name="chatgpt-clone-files")
         st.session_state["vector_store_id"] = vs.id
     return st.session_state["vector_store_id"]
 
+
+# ========== 에이전트 초기화 (앱 재시작 시 한 번만 생성) ==========
 if "agent" not in st.session_state:
     st.session_state["agent"] = Agent(
         name="ChatGPT Clone",
@@ -33,14 +41,17 @@ if "agent" not in st.session_state:
         You have access to the followign tools:
             - Web Search Tool: Use this when the user asks a questions that isn't in your training data. Use this tool when the users asks about current or future events, when you think you don't know the answer, try searching for it in the web first.
             - File Search Tool: Use this tool when the user asks a question about facts related to themselves. Or when they ask questions about specific files.
+            - Code Interpreter Tool: Use this tool when you need to write and run code to answer the user's question.
+            - MCP Tool (Context7): Use this when you need to look up documentation for software projects, libraries, frameworks, or APIs. Use it whenever the user asks about technical documentation.
+            
         """,
         tools=[
-            WebSearchTool(),
+            WebSearchTool(),  # 실시간 웹 검색
             FileSearchTool(
                 vector_store_ids=[get_or_create_vector_store()],
-                max_num_results=3,
+                max_num_results=3,  # 검색 결과 최대 3개
             ),
-            ImageGenerationTool(
+            ImageGenerationTool(  # 텍스트로 이미지 생성
                 tool_config={
                     "type": "image_generation",
                     "quality": "high",
@@ -48,10 +59,28 @@ if "agent" not in st.session_state:
                     "partial_images": 1,
                 }
             ),
+            CodeInterpreterTool(  # Python 코드 작성 및 실행
+                tool_config={
+                    "type": "code_interpreter",
+                    "container": {
+                        "type": "auto",
+                    },
+                }
+            ),
+            HostedMCPTool(  # Context7 - 소프트웨어 문서 검색
+                tool_config={
+                    "server_url": "https://mcp.context7.com/mcp",
+                    "type": "mcp",
+                    "server_label": "Context7",
+                    "server_description": "Use this to get the docs from software projects.",
+                    "require_approval": "never",
+                }
+            ),
         ],
     )
 agent = st.session_state["agent"]
 
+# ========== 대화 기록 세션 (SQLite DB에 저장) ==========
 if "session" not in st.session_state:
     st.session_state["session"] = SQLiteSession(
         "chat-history",
@@ -60,43 +89,56 @@ if "session" not in st.session_state:
 session = st.session_state["session"]
 
 
+# ========== 이전 대화 기록을 화면에 표시 ==========
 async def paint_history():
-    messages = await session.get_items()
+    messages = await session.get_items()  # DB에서 대화 내역 조회
 
     for message in messages:
-        if "role" in message:
+        if "role" in message:  # 사용자/어시스턴트 메시지
             with st.chat_message(message["role"]):
                 if message["role"] == "user":
                     content = message["content"]
                     if isinstance(content, str):
-                        st.write(content)
+                        st.write(content)  # 텍스트 메시지
                     elif isinstance(content, list):
                         for part in content:
                             if "image_url" in part:
-                                st.image(part["image_url"])
+                                st.image(part["image_url"])  # 업로드된 이미지
 
-                else:
+                else:  # 어시스턴트 응답
                     if message["type"] == "message":
-                        st.write(message["content"][0]["text"].replace("$", "\\$"))
-        if "type" in message:
+                        st.write(message["content"][0]["text"].replace("$", "\\$"))  # LaTeX $ 이스케이프
+        if "type" in message:  # 도구 호출 결과 (웹검색, 파일검색 등)
             message_type = message["type"]
-            if message_type == "web_search_call":
+            if message_type == "web_search_call":  # 웹 검색 수행됨
                 with st.chat_message("ai"):
                     st.write("🔍 Searched the web...")
-            elif message_type == "file_search_call":
+            elif message_type == "file_search_call":  # 파일 검색 수행됨
                 with st.chat_message("ai"):
                     st.write("🗂️ Searched your files...")
-            elif message_type == "image_generation_call":
+            elif message_type == "image_generation_call":  # 이미지 생성 결과
                 image = base64.b64decode(message["result"])
                 with st.chat_message("ai"):
                     st.image(image)
+            elif message_type == "code_interpreter_call":  # 코드 실행 결과
+                with st.chat_message("ai"):
+                    st.code(message["code"])
+            elif message_type == "mcp_list_tools":  # MCP 도구 목록 조회
+                with st.chat_message("ai"):
+                    st.write(f"Listed {message["server_label"]}'s tools")
+            elif message_type == "mcp_call":  # MCP 도구 호출
+                with st.chat_message("ai"):
+                    st.write(f"Called {message["server_label"]}'s {message["name"]} with args {message["arguments"]}")
 
 
-asyncio.run(paint_history())
+
+asyncio.run(paint_history())  # 앱 로드 시 이전 대화 렌더링
 
 
+# ========== 도구 실행 상태에 따른 UI 업데이트 ==========
 def update_status(status_container, event):
 
+    # 이벤트 타입 → (표시 텍스트, 상태) 매핑
     status_messages = {
         "response.web_search_call.completed": ("✅ Web search completed.", "complete"),
         "response.web_search_call.in_progress": (
@@ -127,7 +169,52 @@ def update_status(status_container, event):
             "🎨 Drawing image...",
             "running",
         ),
+        "response.image_generation_call.in_progress": (
+            "🎨 Drawing image...",
+            "running",
+        ),
+        "response.code_interpreter_call_code.done": (
+            "🤖 Ran code.",
+            "complete",
+        ),
+        "response.code_interpreter_call.completed": (
+            "🤖 Ran code.",
+            "complete",
+        ),
+        "response.code_interpreter_call.in_progress": (
+            "🤖 Running code...",
+            "complete",
+        ),
+        "response.code_interpreter_call.interpreting": (
+            "🤖 Running code...",
+            "complete",
+        ),
+        "response.mcp_call.completed": (
+            "⚒️ Called MCP tool",
+            "complete",
+        ),
+        "response.mcp_call.failed": (
+            "⚒️ Error calling MCP tool",
+            "complete",
+        ),
+        "response.mcp_call.in_progress": (
+            "⚒️ Calling MCP tool...",
+            "running",
+        ),
+        "response.mcp_list_tools.completed": (
+            "⚒️ Listed MCP tools",
+            "complete",
+        ),
+        "response.mcp_list_tools.failed": (
+            "⚒️ Error listing MCP tools",
+            "complete",
+        ),
+        "response.mcp_list_tools.in_progress": (
+            "⚒️ Listing MCP tools",
+            "running",
+        ),
         "response.completed": (" ", "complete"),
+
     }
 
     if event in status_messages:
@@ -135,37 +222,49 @@ def update_status(status_container, event):
         status_container.update(label=label, state=state)
 
 
+# ========== 사용자 메시지를 받아 에이전트 실행 및 스트리밍 응답 표시 ==========
 async def run_agent(message):
     with st.chat_message("ai"):
-        status_container = st.status("⏳", expanded=False)
-        text_placeholder = st.empty()
-        image_placeholder = st.empty()
+        status_container = st.status("⏳", expanded=False)  # 도구 실행 상태 표시
+        code_placeholder = st.empty()   # 코드 실행 결과 표시 영역
+        text_placeholder = st.empty()   # 텍스트 응답 표시 영역
+        image_placeholder = st.empty()  # 이미지 생성 결과 표시 영역
         response = ""
+        code_response = ""
 
+        # 새 메시지 입력 시 이전 placeholder 비우기 위해 저장
+        st.session_state["code_placeholder"] = code_placeholder
+        st.session_state["image_placeholder"] = image_placeholder
+        st.session_state["text_placeholder"] = text_placeholder
+
+        # 에이전트 실행 (스트리밍 모드로 실시간 응답)
         stream = Runner.run_streamed(
             agent,
             message,
             session=session,
         )
 
+        # 스트리밍 이벤트를 받아 실시간으로 UI 업데이트
         async for event in stream.stream_events():
             if event.type == "raw_response_event":
 
                 update_status(status_container, event.data.type)
 
-                if event.data.type == "response.output_text.delta":
+                if event.data.type == "response.output_text.delta":  # 텍스트 토큰 수신
                     response += event.data.delta
                     text_placeholder.write(response.replace("$", "\\$"))
 
-                elif event.data.type == "response.image_generation_call.partial_image":
+                if event.data.type == "response.code_interpreter_call_code.delta":  # 코드 실행 중
+                    code_response += event.data.delta
+                    code_placeholder.code(code_response)
+
+                elif event.data.type == "response.image_generation_call.partial_image":  # 이미지 생성 중
                     image = base64.b64decode(event.data.partial_image_b64)
                     image_placeholder.image(image)
 
-                elif event.data.type == "response.completed":
-                    image_placeholder.empty()
-                    text_placeholder.empty()
 
 
+# ========== 채팅 입력 UI ==========
 prompt = st.chat_input(
     "Write a message for your assistant",
     accept_file=True,
@@ -177,10 +276,19 @@ prompt = st.chat_input(
     ],
 )
 
+# ========== 사용자 입력 처리 ==========
 if prompt:
+    # 이전 응답 placeholder 비우기
+    if "code_placeholder" in st.session_state:
+        st.session_state["code_placeholder"].empty()
+    if "image_placeholder" in st.session_state:
+        st.session_state["image_placeholder"].empty()
+    if "text_placeholder" in st.session_state:
+        st.session_state["text_placeholder"].empty()
 
+    # 첨부 파일 처리
     for file in prompt.files:
-        if file.type.startswith("text/"):
+        if file.type.startswith("text/"):  # 텍스트 파일 → Vector Store에 업로드
             with st.chat_message("ai"):
                 with st.status("⏳ Uploading file...") as status:
                     uploaded_file = client.files.create(
@@ -193,19 +301,19 @@ if prompt:
                         file_id=uploaded_file.id,
                     )
                     status.update(label="✅ File uploaded", state="complete")
-        elif file.type.startswith("image/"):
+        elif file.type.startswith("image/"):  # 이미지 → 세션에 base64로 저장
             with st.status("⏳ Uploading image...") as status:
                 file_bytes = file.getvalue()
                 base64_data = base64.b64encode(file_bytes).decode("utf-8")
                 data_uri = f"data:{file.type};base64,{base64_data}"
                 asyncio.run(
-                    session.add_items(
+                    session.add_items(  # 대화 기록에 이미지 추가
                         [
                             {
                                 "role": "user",
                                 "content": [
                                     {
-                                        "type": "input_image",
+                                        "type": "input_image",  # OpenAI API 형식
                                         "detail": "auto",
                                         "image_url": data_uri,
                                     }
@@ -218,12 +326,13 @@ if prompt:
             with st.chat_message("human"):
                 st.image(data_uri)
 
-    if prompt.text:
+    if prompt.text:  # 텍스트 메시지가 있으면 에이전트 실행
         with st.chat_message("human"):
             st.write(prompt.text)
         asyncio.run(run_agent(prompt.text))
 
 
+# ========== 사이드바: 메모리 초기화 ==========
 with st.sidebar:
     reset = st.button("Reset memory")
     if reset:
