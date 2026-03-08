@@ -6,6 +6,7 @@ import dotenv
 
 dotenv.load_dotenv()  # .env에서 OPENAI_API_KEY 로드
 from openai import OpenAI
+from openai import BadRequestError
 import asyncio
 import base64
 import streamlit as st
@@ -36,14 +37,22 @@ if "agent" not in st.session_state:
         name="ChatGPT Clone",
         model="gpt-4o-mini",
         instructions="""
-        You are a helpful assistant.
+        You are a warm, encouraging Coach. You celebrate the user's achievements and help them with goals and vision. Respond in Korean.
 
-        You have access to the followign tools:
-            - Web Search Tool: Use this when the user asks a questions that isn't in your training data. Use this tool when the users asks about current or future events, when you think you don't know the answer, try searching for it in the web first.
-            - File Search Tool: Use this tool when the user asks a question about facts related to themselves. Or when they ask questions about specific files.
-            - Code Interpreter Tool: Use this tool when you need to write and run code to answer the user's question.
-            - MCP Tool (Context7): Use this when you need to look up documentation for software projects, libraries, frameworks, or APIs. Use it whenever the user asks about technical documentation.
-            
+        When the user shares a goal achievement (e.g. "올해 책 10권 읽기 목표 달성했어!"):
+            - Congratulate them warmly, then use the Image Generation tool to create a celebration image (e.g. "책 10권 읽기 달성 축하!").
+            - Describe the image prompt in a way that fits their achievement.
+
+        When the user asks for a vision board (e.g. "2025년 목표로 비전 보드 만들어 줄 수 있어?"):
+            - First use the File Search tool to find their goals/plans document (목표, 계획, 비전 등이 적힌 파일).
+            - Summarize what you found (e.g. "목표를 확인했어요: 운동, 한국어 학습, 여행...") and tell the user.
+            - Then use the Image Generation tool to create a vision board image that reflects those themes (e.g. 운동, 언어, 여행이 담긴 비전 보드).
+
+        You have access to the following tools:
+            - Web Search Tool: Use when the user asks about things outside your training data, current/future events, or when you need to search the web.
+            - File Search Tool: Use when the user talks about their own facts, goals, plans, or specific files (e.g. 목표 문서, 계획서). Use this before making vision boards so the image matches their real goals.
+            - Image Generation Tool: Use for celebration images and vision boards. Create concrete, positive image prompts.
+            - Code Interpreter Tool: Use when you need to write and run code to answer the user's question.
         """,
         tools=[
             WebSearchTool(),  # 실시간 웹 검색
@@ -67,15 +76,16 @@ if "agent" not in st.session_state:
                     },
                 }
             ),
-            HostedMCPTool(  # Context7 - 소프트웨어 문서 검색
-                tool_config={
-                    "server_url": "https://mcp.context7.com/mcp",
-                    "type": "mcp",
-                    "server_label": "Context7",
-                    "server_description": "Use this to get the docs from software projects.",
-                    "require_approval": "never",
-                }
-            ),
+            # HostedMCPTool: input[x].action 400 오류 시 일시 비활성화 (SDK/API 호환 이슈)
+            # HostedMCPTool(
+            #     tool_config={
+            #         "server_url": "https://mcp.context7.com/mcp",
+            #         "type": "mcp",
+            #         "server_label": "Context7",
+            #         "server_description": "Use this to get the docs from software projects.",
+            #         "require_approval": "never",
+            #     }
+            # ),
         ],
     )
 agent = st.session_state["agent"]
@@ -245,22 +255,25 @@ async def run_agent(message):
         )
 
         # 스트리밍 이벤트를 받아 실시간으로 UI 업데이트
-        async for event in stream.stream_events():
-            if event.type == "raw_response_event":
+        try:
+            async for event in stream.stream_events():
+                if event.type == "raw_response_event":
 
-                update_status(status_container, event.data.type)
+                    update_status(status_container, event.data.type)
 
-                if event.data.type == "response.output_text.delta":  # 텍스트 토큰 수신
-                    response += event.data.delta
-                    text_placeholder.write(response.replace("$", "\\$"))
+                    if event.data.type == "response.output_text.delta":  # 텍스트 토큰 수신
+                        response += event.data.delta
+                        text_placeholder.write(response.replace("$", "\\$"))
 
-                if event.data.type == "response.code_interpreter_call_code.delta":  # 코드 실행 중
-                    code_response += event.data.delta
-                    code_placeholder.code(code_response)
+                    if event.data.type == "response.code_interpreter_call_code.delta":  # 코드 실행 중
+                        code_response += event.data.delta
+                        code_placeholder.code(code_response)
 
-                elif event.data.type == "response.image_generation_call.partial_image":  # 이미지 생성 중
-                    image = base64.b64decode(event.data.partial_image_b64)
-                    image_placeholder.image(image)
+                    elif event.data.type == "response.image_generation_call.partial_image":  # 이미지 생성 중
+                        image = base64.b64decode(event.data.partial_image_b64)
+                        image_placeholder.image(image)
+        except BadRequestError:
+            raise  # 상위에서 세션 클리어 후 rerun 처리
 
 
 
@@ -329,7 +342,16 @@ if prompt:
     if prompt.text:  # 텍스트 메시지가 있으면 에이전트 실행
         with st.chat_message("human"):
             st.write(prompt.text)
-        asyncio.run(run_agent(prompt.text))
+        try:
+            asyncio.run(run_agent(prompt.text))
+        except BadRequestError as e:
+            err_msg = str(e)
+            if "Unknown parameter" in err_msg:
+                asyncio.run(session.clear_session())
+                st.error("API 형식 오류로 대화를 비웠어요. 다시 메시지를 보내 주세요. (계속되면 HostedMCPTool 비활성화 상태로 실행 중일 수 있어요)")
+                st.rerun()
+            else:
+                raise
 
 
 # ========== 사이드바: 메모리 초기화 ==========
@@ -337,4 +359,5 @@ with st.sidebar:
     reset = st.button("Reset memory")
     if reset:
         asyncio.run(session.clear_session())
+        st.rerun()  # 화면 다시 그리기 → paint_history()가 빈 목록으로 대화창 클리어
     st.write(asyncio.run(session.get_items()))

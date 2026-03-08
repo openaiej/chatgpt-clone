@@ -1,3 +1,18 @@
+# 프로젝트 셋업
+##
+1. Python용 uv 설치 (WinGet 권장)
+PowerShell에서:
+
+winget install --id=astral-sh.uv -e
+설치 후 터미널을 한 번 닫았다가 다시 열고 프로젝트 폴더에서:
+
+uv sync
+2. WinGet이 없을 때 (공식 설치 스크립트)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+역시 터미널을 다시 연 다음 uv sync 실행하면 됩니다.
+
+## uv sync
+
 # 2025년 2월 25일 (수)
 1. 메모리 시스템 활성화하기
 # 2026-03-06(금)
